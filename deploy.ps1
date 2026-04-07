@@ -1,5 +1,5 @@
-# Deploy bilsnapper-scanner til Cloud Run (bygg + deploy via cloudbuild.yaml)
-# Kjør: høyreklikk -> "Run with PowerShell", eller: deploy.cmd
+# Deploy bilsnapper-scanner to Cloud Run (cloudbuild.yaml)
+# Run: deploy.cmd or powershell -File deploy.ps1
 
 $ErrorActionPreference = 'Stop'
 $ScannerRoot = $PSScriptRoot
@@ -21,27 +21,28 @@ function Find-Gcloud {
   return $null
 }
 
-function Write-Log($msg) {
-  $line = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg
+function Write-Log {
+  param([string]$Message)
+  $line = '[{0}] {1}' -f (Get-Date -Format 'HH:mm:ss'), $Message
   Write-Host $line
   Add-Content -Path $LogFile -Value $line -Encoding UTF8
 }
 
 $gcloud = Find-Gcloud
 if (-not $gcloud) {
-  Write-Host "FEIL: Fant ikke gcloud. Installer Google Cloud SDK: https://cloud.google.com/sdk/docs/install"
+  Write-Host 'ERROR: gcloud not found. Install Google Cloud SDK from https://cloud.google.com/sdk/docs/install'
   exit 1
 }
 
-Write-Log "Bruker gcloud: $gcloud"
-Write-Log "Logger til: $LogFile"
+Write-Log ('Using gcloud: ' + $gcloud)
+Write-Log ('Logging to: ' + $LogFile)
 Set-Location $ScannerRoot
 
 try {
-  Write-Log "Setter prosjekt $ProjectId ..."
+  Write-Log ('Setting project ' + $ProjectId + ' ...')
   & $gcloud config set project $ProjectId 2>&1 | Tee-Object -FilePath $LogFile -Append
 
-  Write-Log "Starter Cloud Build (5-20 min) — output vises live ..."
+  Write-Log 'Starting Cloud Build (5-20 min, output below) ...'
   $transcript = Join-Path $ScannerRoot ('transcript-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.txt')
   Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
   Start-Transcript -Path $transcript -Force | Out-Null
@@ -51,20 +52,25 @@ try {
   } finally {
     Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
   }
-  Add-Content -Path $LogFile -Value (Get-Content $transcript -Raw -ErrorAction SilentlyContinue) -Encoding UTF8
+  $raw = Get-Content -Path $transcript -Raw -ErrorAction SilentlyContinue
+  if ($raw) {
+    Add-Content -Path $LogFile -Value $raw -Encoding UTF8
+  }
   if ($exitCode -ne 0) {
-    Write-Log "BYGG FEILET (exit $exitCode). Siste linjer:"
+    Write-Log ('BUILD FAILED (exit ' + $exitCode + '). Last lines:')
     Get-Content $LogFile -Tail 40 | ForEach-Object { Write-Host $_ }
     exit $exitCode
   }
 
-  Write-Log "BYGG OK."
+  Write-Log 'BUILD OK.'
   $url = & $gcloud run services describe bilsnapper-scanner --region=us-west1 --platform=managed --format=value(status.url) 2>&1
-  Write-Log "Cloud Run URL: $url"
-  Write-Host ""
-  Write-Host "Ferdig. Åpne Cloud Build ved feil: https://console.cloud.google.com/cloud-build/builds?project=$ProjectId"
-  Write-Host "Neste steg (kun første gang): dobbeltklikk setup-scheduler.bat for Cloud Scheduler."
-} catch {
-  Write-Log "Exception: $_"
+  Write-Log ('Cloud Run URL: ' + $url)
+  Write-Host ''
+  Write-Host ('Done. Cloud Build console: https://console.cloud.google.com/cloud-build/builds?project=' + $ProjectId)
+  Write-Host 'Next (once): run setup-scheduler.bat for Cloud Scheduler.'
+}
+catch {
+  $err = $_.Exception.Message
+  Write-Log ('Exception: ' + $err)
   throw
 }
