@@ -1,26 +1,24 @@
+# Build -> push -> deploy. No top-level "images:" (avoids pushing twice = fewer API mutate calls / quota).
 steps:
-  # Bygg Docker-image
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - build
       - '-t'
-      - 'gcr.io/$PROJECT_ID/bilsnapper-scanner:latest'
+      - 'us-west1-docker.pkg.dev/$PROJECT_ID/bilsnapper/bilsnapper-scanner:latest'
       - '.'
 
-  # Push til Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - push
-      - 'gcr.io/$PROJECT_ID/bilsnapper-scanner:latest'
+      - 'us-west1-docker.pkg.dev/$PROJECT_ID/bilsnapper/bilsnapper-scanner:latest'
 
-  # Deploy til Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - run
       - deploy
       - bilsnapper-scanner
-      - '--image=gcr.io/$PROJECT_ID/bilsnapper-scanner:latest'
+      - '--image=us-west1-docker.pkg.dev/$PROJECT_ID/bilsnapper/bilsnapper-scanner:latest'
       - '--region=us-west1'
       - '--platform=managed'
       - '--no-allow-unauthenticated'
@@ -31,9 +29,6 @@ steps:
       - '--min-instances=0'
       - '--max-instances=1'
       - '--set-env-vars=GOOGLE_CLOUD_PROJECT=$PROJECT_ID,FIRESTORE_DATABASE_ID=ai-studio-724f6025-f227-47f5-978b-3fcd3f2803d3,LOCAL_CRON=false'
-
-images:
-  - 'gcr.io/$PROJECT_ID/bilsnapper-scanner:latest'
 
 options:
   logging: CLOUD_LOGGING_ONLY
