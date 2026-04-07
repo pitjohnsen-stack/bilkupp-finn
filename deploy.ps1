@@ -1,7 +1,8 @@
 # Deploy bilsnapper-scanner to Cloud Run (cloudbuild.yaml)
 # Run: deploy.cmd or powershell -File deploy.ps1
+#
+# Avoids: NativeCommandError from gcloud stderr (2>&1), and Start/Stop-Transcript host bugs.
 
-# gcloud writes normal messages to stderr; Stop + 2>&1 makes PowerShell treat them as fatal (NativeCommandError).
 $ErrorActionPreference = 'Continue'
 $ScannerRoot = $PSScriptRoot
 $ProjectId   = 'ferrous-layout-382117'
@@ -29,6 +30,22 @@ function Write-Log {
   Add-Content -Path $LogFile -Value $line -Encoding UTF8
 }
 
+function Invoke-GCloudCmd {
+  param(
+    [string]$GcloudPath,
+    [string]$ArgLine,
+    [string]$WorkingDir
+  )
+  # Live output + correct exit code. cmd runs gcloud.cmd so PowerShell does not wrap stderr as ErrorRecord.
+  Push-Location $WorkingDir
+  try {
+    & cmd.exe /c "`"$GcloudPath`" $ArgLine"
+    return [int]$LASTEXITCODE
+  } finally {
+    Pop-Location
+  }
+}
+
 $gcloud = Find-Gcloud
 if (-not $gcloud) {
   Write-Host 'ERROR: gcloud not found. Install Google Cloud SDK from https://cloud.google.com/sdk/docs/install'
@@ -41,29 +58,21 @@ Set-Location $ScannerRoot
 
 try {
   Write-Log ('Setting project ' + $ProjectId + ' ...')
-  & $gcloud config set project $ProjectId 2>&1 | Tee-Object -FilePath $LogFile -Append
-  if ($LASTEXITCODE -ne 0) {
-    Write-Log ('gcloud config set failed (exit ' + $LASTEXITCODE + ').')
-    exit $LASTEXITCODE
+  $code = Invoke-GCloudCmd -GcloudPath $gcloud -ArgLine ('config set project ' + $ProjectId) -WorkingDir $ScannerRoot
+  Write-Log ('gcloud config set exited: ' + $code)
+  if ($code -ne 0) {
+    Write-Log 'gcloud config set failed.'
+    exit $code
   }
 
   Write-Log 'Starting Cloud Build (5-20 min, output below) ...'
-  $transcript = Join-Path $ScannerRoot ('transcript-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.txt')
-  Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
-  Start-Transcript -Path $transcript -Force | Out-Null
-  try {
-    & $gcloud builds submit --config cloudbuild.yaml
-    $exitCode = $LASTEXITCODE
-  } finally {
-    Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
-  }
-  $raw = Get-Content -Path $transcript -Raw -ErrorAction SilentlyContinue
-  if ($raw) {
-    Add-Content -Path $LogFile -Value $raw -Encoding UTF8
-  }
+  Write-Log '(Full build log also in Cloud Console.)'
+  $exitCode = Invoke-GCloudCmd -GcloudPath $gcloud -ArgLine 'builds submit --config cloudbuild.yaml' -WorkingDir $ScannerRoot
+  Write-Log ('gcloud builds submit exited: ' + $exitCode)
+
   if ($exitCode -ne 0) {
-    Write-Log ('BUILD FAILED (exit ' + $exitCode + '). Last lines:')
-    Get-Content $LogFile -Tail 40 | ForEach-Object { Write-Host $_ }
+    Write-Log ('BUILD FAILED (exit ' + $exitCode + '). Open Cloud Build logs in console.')
+    Write-Host ('https://console.cloud.google.com/cloud-build/builds?project=' + $ProjectId)
     exit $exitCode
   }
 
