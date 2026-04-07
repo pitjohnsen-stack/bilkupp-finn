@@ -41,13 +41,21 @@ try {
   Write-Log "Setter prosjekt $ProjectId ..."
   & $gcloud config set project $ProjectId 2>&1 | Tee-Object -FilePath $LogFile -Append
 
-  Write-Log "Starter Cloud Build (5-20 min) ..."
-  & $gcloud builds submit --config cloudbuild.yaml 2>&1 | Tee-Object -FilePath $LogFile -Append
-
-  if ($LASTEXITCODE -ne 0) {
-    Write-Log "BYGG FEILET (exit $LASTEXITCODE). Siste linjer:"
+  Write-Log "Starter Cloud Build (5-20 min) — output vises live ..."
+  $transcript = Join-Path $ScannerRoot ('transcript-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.txt')
+  Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
+  Start-Transcript -Path $transcript -Force | Out-Null
+  try {
+    & $gcloud builds submit --config cloudbuild.yaml
+    $exitCode = $LASTEXITCODE
+  } finally {
+    Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
+  }
+  Add-Content -Path $LogFile -Value (Get-Content $transcript -Raw -ErrorAction SilentlyContinue) -Encoding UTF8
+  if ($exitCode -ne 0) {
+    Write-Log "BYGG FEILET (exit $exitCode). Siste linjer:"
     Get-Content $LogFile -Tail 40 | ForEach-Object { Write-Host $_ }
-    exit $LASTEXITCODE
+    exit $exitCode
   }
 
   Write-Log "BYGG OK."
