@@ -7,49 +7,73 @@ const { findTransportDeals }       = require('./transport');
 const { filterExcludedListings }   = require('./listing-filters');
 const firebaseDb                   = require('./firebase-db');
 
+/** Kjør async oppgaver med begrenset parallellisme (unngår å åpne 18 faner samtidig). */
+async function runPool(items, concurrency, worker) {
+  const results = [];
+  for (let i = 0; i < items.length; i += concurrency) {
+    const chunk = items.slice(i, i + concurrency);
+    results.push(...(await Promise.all(chunk.map(worker))));
+  }
+  return results;
+}
+
 async function runScanAndSave(onProgress = null) {
   console.log(`[${new Date().toLocaleString('nb-NO')}] Starter scan...`);
 
   const primaryRegions = config.regions.primary;
   const extraRegions   = config.regions.extra;
   const allRegions     = config.regions.all();
+  const regionConc     = config.scan.regionConcurrency;
+  const pricePages     = config.scan.priceFetchMaxPages;
 
-  // Steg 1a: Hent prisdata fra alle regioner (uten prisbegrensning)
-  console.log('  Henter prisdata (alle regioner)...');
+  // Steg 1a: Hent prisdata fra alle regioner (uten prisbegrensning) — flere regioner i parallell
+  console.log(`  Henter prisdata (${allRegions.length} regioner, opptil ${regionConc} samtidig, ${pricePages} sider/region)...`);
   const priceDataMap = new Map();
-  for (const region of allRegions) {
+  let doneRegions = 0;
+  await runPool(allRegions, regionConc, async (region) => {
     const locationId = config.regions.getLocationId(region);
     try {
-      const ads = await fetchAllCarsInRegion(locationId, 25);
+      const ads = await fetchAllCarsInRegion(locationId, pricePages);
       for (const ad of ads) {
         if (ad.id && !priceDataMap.has(ad.id)) priceDataMap.set(ad.id, ad);
       }
-      process.stdout.write(`\r  [prisdata] ${priceDataMap.size} annonser samlet...`);
     } catch (err) {
       console.error(`  Feil prisdata ${region}: ${err.message}`);
+    } finally {
+      doneRegions += 1;
+      process.stdout.write(`\r  [prisdata] region ${doneRegions}/${allRegions.length} | ${priceDataMap.size} unike annonser`);
     }
-  }
+  });
   console.log(`\n  Prisdata: ${priceDataMap.size} unike annonser`);
 
   // Oppdater price-db i Firestore
   console.log('  Oppdaterer prisdatabase...');
   await firebaseDb.updateFromScan([...priceDataMap.values()]);
 
-  // Steg 1b: Hent deal-kandidater (billige biler) per region
+  // Steg 1b: Hent deal-kandidater (billige biler) per region — parallell som prisdata
   const localAds    = [];
   const adsByRegion = new Map();
+  let dealDone = 0;
 
-  for (const region of allRegions) {
+  const dealResults = await runPool(allRegions, regionConc, async (region) => {
     const locationId = config.regions.getLocationId(region);
-    console.log(`  Henter deal-kandidater ${region}...`);
     try {
       const ads = await fetchCarsInRegion(locationId, config.search.maxPrice);
-      adsByRegion.set(region, ads);
-      if (primaryRegions.includes(region) || extraRegions.includes(region)) {
-        localAds.push(...ads);
-      }
+      return { region, ads, err: null };
     } catch (err) {
-      console.error(`  Feil ${region}: ${err.message}`);
+      console.error(`  Feil deal ${region}: ${err.message}`);
+      return { region, ads: [], err: err.message };
+    } finally {
+      dealDone += 1;
+      process.stdout.write(`\r  [deals] region ${dealDone}/${allRegions.length} ferdig`);
+    }
+  });
+
+  console.log('');
+  for (const { region, ads } of dealResults) {
+    adsByRegion.set(region, ads);
+    if (primaryRegions.includes(region) || extraRegions.includes(region)) {
+      localAds.push(...ads);
     }
   }
 

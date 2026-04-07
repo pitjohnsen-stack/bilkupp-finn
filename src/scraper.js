@@ -6,12 +6,24 @@ const puppeteer = require('puppeteer-core');
 const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH
   || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
-const SEARCH_BASE      = 'https://www.finn.no/mobility/search/car';
-const ITEM_BASE        = 'https://www.finn.no/mobility/item';
-const DELAY_MS         = 1500;
-const DETAIL_DELAY     = 800;
-const CONCURRENT_DETAILS = 3;
-const DEFAULT_MAX_PAGES  = parseInt(process.env.MAX_PAGES || '3', 10);
+const SEARCH_BASE = 'https://www.finn.no/mobility/search/car';
+const ITEM_BASE   = 'https://www.finn.no/mobility/item';
+
+/** Millisekund mellom listesider (samme fane). Lavere = raskere, høyere rate-limit-risk. */
+const DELAY_MS = parseInt(process.env.SCRAPE_LIST_DELAY_MS || '450', 10);
+/** Pause mellom batcher med detalj-faner */
+const DETAIL_DELAY = parseInt(process.env.SCRAPE_DETAIL_DELAY_MS || '120', 10);
+/** Samtidige annonse-detaljsider */
+const CONCURRENT_DETAILS = Math.max(
+  1,
+  parseInt(process.env.SCRAPE_CONCURRENT_DETAILS || '8', 10),
+);
+/** 'load' er mye raskere enn networkidle*; kan justeres med env ved treff-problemer */
+const LIST_WAIT_UNTIL   = process.env.SCRAPE_LIST_WAIT_UNTIL || 'load';
+const DETAIL_WAIT_UNTIL = process.env.SCRAPE_DETAIL_WAIT_UNTIL || 'load';
+const SEO_SELECTOR_WAIT_MS = parseInt(process.env.SCRAPE_SEO_WAIT_MS || '12000', 10);
+
+const DEFAULT_MAX_PAGES = parseInt(process.env.MAX_PAGES || '3', 10);
 
 let browserInstance = null;
 
@@ -25,6 +37,8 @@ async function getBrowser() {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
+        '--disable-extensions',
+        '--disable-background-networking',
         '--single-process',
       ],
     });
@@ -42,41 +56,52 @@ async function closeBrowser() {
 async function fetchAllAds(searchParams, maxPages = DEFAULT_MAX_PAGES) {
   const browser = await getBrowser();
   const allAds  = [];
+  const tabPage = await browser.newPage();
 
-  for (let page = 1; page <= maxPages; page++) {
-    const params = new URLSearchParams({ ...searchParams, page: String(page), registration_class: '1' });
-    const url    = `${SEARCH_BASE}?${params.toString()}`;
-    const tabPage = await browser.newPage();
-    let pageAds   = [];
+  try {
+    await tabPage.setRequestInterception(true);
+    tabPage.on('request', req => {
+      if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) req.abort();
+      else req.continue();
+    });
 
-    try {
-      await tabPage.setRequestInterception(true);
-      tabPage.on('request', req => {
-        if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) req.abort();
-        else req.continue();
-      });
-      await tabPage.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-      const seoData = await tabPage.evaluate(() => {
-        const el = document.getElementById('seoStructuredData');
-        return el ? el.textContent : null;
-      });
-      if (seoData) {
-        const parsed = JSON.parse(seoData);
-        const items  = parsed.mainEntity?.itemListElement || [];
-        pageAds      = items.map(parseSeoAd).filter(Boolean);
+    for (let page = 1; page <= maxPages; page++) {
+      const params = new URLSearchParams({ ...searchParams, page: String(page), registration_class: '1' });
+      const url     = `${SEARCH_BASE}?${params.toString()}`;
+      let pageAds   = [];
+
+      try {
+        await tabPage.goto(url, { waitUntil: LIST_WAIT_UNTIL, timeout: 45000 });
+        try {
+          await tabPage.waitForSelector('#seoStructuredData', { timeout: SEO_SELECTOR_WAIT_MS });
+        } catch (_) {
+          /* Fortsett — noen ganger er JSON-LD likevel i DOM */
+        }
+        const seoData = await tabPage.evaluate(() => {
+          const el = document.getElementById('seoStructuredData');
+          return el ? el.textContent : null;
+        });
+        if (seoData) {
+          const parsed = JSON.parse(seoData);
+          const items  = parsed.mainEntity?.itemListElement || [];
+          pageAds      = items.map(parseSeoAd).filter(Boolean);
+        }
+      } catch (err) {
+        console.error(`  [scraper] Side ${page} feilet: ${err.message}`);
+        break;
       }
-    } finally {
-      await tabPage.close();
-    }
 
-    if (pageAds.length === 0) {
-      console.log(`  [scraper] Ingen data på side ${page}, stopper.`);
-      break;
+      if (pageAds.length === 0) {
+        console.log(`  [scraper] Ingen data på side ${page}, stopper.`);
+        break;
+      }
+      allAds.push(...pageAds);
+      process.stdout.write(`\r  [scraper] Side ${page} → ${allAds.length} annonser`);
+      if (pageAds.length < 20) break;
+      if (page < maxPages && DELAY_MS > 0) await new Promise(r => setTimeout(r, DELAY_MS));
     }
-    allAds.push(...pageAds);
-    process.stdout.write(`\r  [scraper] Side ${page} → ${allAds.length} annonser`);
-    if (pageAds.length < 20) break;
-    if (page < maxPages) await new Promise(r => setTimeout(r, DELAY_MS));
+  } finally {
+    await tabPage.close();
   }
 
   console.log('');
@@ -93,7 +118,10 @@ async function fetchAdDetails(browser, ad) {
       if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) req.abort();
       else req.continue();
     });
-    await tabPage.goto(url, { waitUntil: 'networkidle0', timeout: 25000 });
+    await tabPage.goto(url, { waitUntil: DETAIL_WAIT_UNTIL, timeout: 35000 });
+    try {
+      await tabPage.waitForSelector('script[type="application/ld+json"]', { timeout: 8000 });
+    } catch (_) {}
 
     const details = await tabPage.evaluate(() => {
       const result = {};
@@ -185,17 +213,18 @@ async function fetchAdDetails(browser, ad) {
 async function enrichAds(ads, concurrency = CONCURRENT_DETAILS, onProgress = null) {
   const browser  = await getBrowser();
   const enriched = [];
-  let done = 0;
+  let done       = 0;
+  const limit    = concurrency || CONCURRENT_DETAILS;
 
-  for (let i = 0; i < ads.length; i += concurrency) {
-    const batch   = ads.slice(i, i + concurrency);
+  for (let i = 0; i < ads.length; i += limit) {
+    const batch   = ads.slice(i, i + limit);
     const results = await Promise.all(batch.map(ad => fetchAdDetails(browser, ad)));
     enriched.push(...results);
     done += results.length;
-    const pct = Math.round(done / ads.length * 100);
+    const pct = Math.round((done / ads.length) * 100);
     process.stdout.write(`\r  [scraper] Detaljer: ${done}/${ads.length} (${pct}%)`);
     if (onProgress) onProgress(done, ads.length, pct);
-    if (i + concurrency < ads.length) await new Promise(r => setTimeout(r, DETAIL_DELAY));
+    if (i + limit < ads.length && DETAIL_DELAY > 0) await new Promise(r => setTimeout(r, DETAIL_DELAY));
   }
 
   console.log('');

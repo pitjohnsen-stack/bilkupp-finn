@@ -43,6 +43,15 @@ const config = {
 
   schedule: process.env.CRON_SCHEDULE || '0 */6 * * *',
 
+  /** Hastighet: flere regioner samtidig (å øke for mye kan gi rate-limit fra Finn) */
+  scan: {
+    regionConcurrency: Math.min(
+      12,
+      Math.max(1, parseInt(process.env.SCAN_REGION_CONCURRENCY || '4', 10)),
+    ),
+    priceFetchMaxPages: Math.max(1, parseInt(process.env.PRICE_FETCH_MAX_PAGES || '25', 10)),
+  },
+
   listingExclude: {
     titleSubstrings: parseExcludeTitleSubstrings(process.env.EXCLUDE_TITLE_SUBSTRINGS),
   },
