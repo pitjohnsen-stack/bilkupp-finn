@@ -4,17 +4,10 @@ steps:
     args:
       - build
       - '-t'
-      - 'gcr.io/$PROJECT_ID/bilsnapper-scanner:$COMMIT_SHA'
-      - '-t'
       - 'gcr.io/$PROJECT_ID/bilsnapper-scanner:latest'
       - '.'
 
   # Push til Container Registry
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - push
-      - 'gcr.io/$PROJECT_ID/bilsnapper-scanner:$COMMIT_SHA'
-
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - push
@@ -27,8 +20,8 @@ steps:
       - run
       - deploy
       - bilsnapper-scanner
-      - '--image=gcr.io/$PROJECT_ID/bilsnapper-scanner:$COMMIT_SHA'
-      - '--region=europe-north1'
+      - '--image=gcr.io/$PROJECT_ID/bilsnapper-scanner:latest'
+      - '--region=us-west1'
       - '--platform=managed'
       - '--no-allow-unauthenticated'
       - '--memory=2Gi'
@@ -40,7 +33,6 @@ steps:
       - '--set-env-vars=GOOGLE_CLOUD_PROJECT=$PROJECT_ID,FIRESTORE_DATABASE_ID=ai-studio-724f6025-f227-47f5-978b-3fcd3f2803d3,LOCAL_CRON=false'
 
 images:
-  - 'gcr.io/$PROJECT_ID/bilsnapper-scanner:$COMMIT_SHA'
   - 'gcr.io/$PROJECT_ID/bilsnapper-scanner:latest'
 
 options:
