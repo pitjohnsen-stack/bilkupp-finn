@@ -1,7 +1,8 @@
 # Deploy bilsnapper-scanner to Cloud Run (cloudbuild.yaml)
 # Run: deploy.cmd or powershell -File deploy.ps1
 
-$ErrorActionPreference = 'Stop'
+# gcloud writes normal messages to stderr; Stop + 2>&1 makes PowerShell treat them as fatal (NativeCommandError).
+$ErrorActionPreference = 'Continue'
 $ScannerRoot = $PSScriptRoot
 $ProjectId   = 'ferrous-layout-382117'
 $LogFile     = Join-Path $ScannerRoot ('deploy-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')
@@ -41,6 +42,10 @@ Set-Location $ScannerRoot
 try {
   Write-Log ('Setting project ' + $ProjectId + ' ...')
   & $gcloud config set project $ProjectId 2>&1 | Tee-Object -FilePath $LogFile -Append
+  if ($LASTEXITCODE -ne 0) {
+    Write-Log ('gcloud config set failed (exit ' + $LASTEXITCODE + ').')
+    exit $LASTEXITCODE
+  }
 
   Write-Log 'Starting Cloud Build (5-20 min, output below) ...'
   $transcript = Join-Path $ScannerRoot ('transcript-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.txt')
@@ -63,7 +68,8 @@ try {
   }
 
   Write-Log 'BUILD OK.'
-  $url = & $gcloud run services describe bilsnapper-scanner --region=us-west1 --platform=managed --format=value(status.url) 2>&1
+  $url = (& $gcloud run services describe bilsnapper-scanner --region=us-west1 --platform=managed --format=value(status.url) 2>$null)
+  if (-not $url) { $url = '(could not read URL; check Cloud Run console)' }
   Write-Log ('Cloud Run URL: ' + $url)
   Write-Host ''
   Write-Host ('Done. Cloud Build console: https://console.cloud.google.com/cloud-build/builds?project=' + $ProjectId)
